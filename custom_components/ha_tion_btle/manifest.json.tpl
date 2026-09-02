@@ -4,10 +4,11 @@
   "documentation": "https://github.com/TionAPI/HA-tion/wiki",
   "dependencies": [
     "bluetooth",
+    "bluetooth_adapters",
     "fan"
   ],
   "requirements": [
-    "tion-btle==3.3.6"
+    "https://github.com/lifespirit/tion_python/archive/00b5527fc7194b66a58afcf939b244ed6d6dcff6.zip#tion-btle==3.3.7.dev0"
   ],
   "codeowners": [
     "@IATkachenko"

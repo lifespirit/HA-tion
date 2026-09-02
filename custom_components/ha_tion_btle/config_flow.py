@@ -8,11 +8,14 @@ import asyncio
 import bleak
 import tion_btle
 import voluptuous as vol
+from bleak import BleakClient
+from bleak.backends.device import BLEDevice
+from bleak_retry_connector import establish_connection
 
 from homeassistant import config_entries
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import callback, async_get_hass
+from homeassistant.core import callback
 from tion_btle.tion import Tion
 
 from .const import DOMAIN, TION_SCHEMA, CONF_MAC
@@ -93,14 +96,27 @@ class TionFlow:
             pass
         return data
 
-    @staticmethod
-    def getTion(model: str, mac: str) -> tion_btle.TionS3 | tion_btle.TionLite | tion_btle.TionS4:
+    def getTion(self, model: str, mac: str) -> tion_btle.TionS3 | tion_btle.TionLite | tion_btle.TionS4:
 
-        btle_device = bluetooth.async_ble_device_from_address(hass=async_get_hass(), address=mac, connectable=True)
+        btle_device = bluetooth.async_ble_device_from_address(
+            hass=self.hass,
+            address=mac,
+            connectable=True,
+        )
         if btle_device is None:
             message = f"Could not find device with {mac=}"
             _LOGGER.critical(f"getTion: {message}")
             raise bleak.BleakError(message)
+
+        async def connection_factory(device: str | BLEDevice) -> BleakClient:
+            if not isinstance(device, BLEDevice):
+                raise ValueError("Home Assistant must provide a BLEDevice")
+            return await establish_connection(
+                BleakClient,
+                device,
+                mac,
+                max_attempts=3,
+            )
 
         if model == 'S3':
             from tion_btle.s3 import TionS3 as Breezer
@@ -110,13 +126,13 @@ class TionFlow:
             from tion_btle.lite import TionLite as Breezer
         else:
             raise NotImplementedError("Model '%s' is not supported!" % model)
-        return Breezer(btle_device)
+        return Breezer(btle_device, connection_factory=connection_factory)
 
 
 class TionConfigFlow(TionFlow, config_entries.ConfigFlow, domain=DOMAIN):
     """Initial setup."""
     VERSION = 1
-    CONNECTION_CLASS = config_entries.CONN_CLASS_CLOUD_POLL
+    CONNECTION_CLASS = config_entries.CONN_CLASS_LOCAL_POLL
 
     def __init__(self):
         super().__init__()
@@ -146,7 +162,7 @@ class TionConfigFlow(TionFlow, config_entries.ConfigFlow, domain=DOMAIN):
                 _LOGGER.debug(input)
                 try:
                     _tion: Tion = self.getTion(input['model'], input['mac'])
-                    result = _tion.get()
+                    result = await _tion.get()
                 except Exception as e:
                     _LOGGER.error("Could not get data from breezer. result is %s, error: %s" % (result, str(e)))
                     return self.async_show_form(step_id='add_failed')

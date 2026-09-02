@@ -1,19 +1,22 @@
 """The Tion breezer component."""
 from __future__ import annotations
 
-from bleak.backends.device import BLEDevice
+import asyncio
 import datetime
 import logging
 import math
-from datetime import timedelta
+from collections.abc import Awaitable, Callable
 from functools import cached_property
 
+from bleak import BleakClient
+from bleak.backends.device import BLEDevice
+from bleak_retry_connector import BLEAK_RETRY_EXCEPTIONS, establish_connection
 import tion_btle
 from homeassistant.components import bluetooth
 from homeassistant.components.bluetooth import BluetoothCallbackMatcher
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
-from tion_btle.tion import Tion, MaxTriesExceededError
+from tion_btle.tion import MaxTriesExceededError, Tion
 from .const import DOMAIN, TION_SCHEMA, CONF_KEEP_ALIVE, CONF_AWAY_TEMP, CONF_MAC, PLATFORMS
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -64,10 +67,16 @@ class TionInstance(DataUpdateCoordinator):
         except KeyError:
             pass
 
-        # delay before next update if we got btle.BTLEDisconnectError
-        self._delay: int = 600
+        # A short backoff keeps a transient BLE failure from making controls
+        # appear broken for ten minutes.
+        self._delay: int = 30
+        self._operation_lock = asyncio.Lock()
 
-        self.__tion: Tion = self.getTion(self.model, btle_device)
+        self.__tion: Tion = self.getTion(
+            self.model,
+            btle_device,
+            connection_factory=self._establish_connection,
+        )
         self.__keep_alive = datetime.timedelta(seconds=self.__keep_alive)
         self._delay = datetime.timedelta(seconds=self._delay)
         self.rssi: int = 0
@@ -112,17 +121,23 @@ class TionInstance(DataUpdateCoordinator):
         response: dict[str, str | bool | int] = {}
 
         try:
-            response = await self.__tion.get()
+            async with self._operation_lock:
+                self._refresh_btle_device()
+                response = await self.__tion.get()
             self.update_interval = self.__keep_alive
 
         except MaxTriesExceededError as e:
-            _LOGGER.critical("Got exception %s", str(e))
-            _LOGGER.critical("Will delay next check")
+            _LOGGER.warning("Could not connect to Tion: %s", str(e))
             self.update_interval = self._delay
-            raise UpdateFailed("MaxTriesExceededError")
+            raise UpdateFailed("Could not connect to Tion") from e
+        except BLEAK_RETRY_EXCEPTIONS as e:
+            _LOGGER.warning("Bluetooth operation failed: %s", str(e))
+            self.update_interval = self._delay
+            raise UpdateFailed(f"Bluetooth operation failed: {e}") from e
         except Exception as e:
-            _LOGGER.critical(f"{response=}, {e=}")
-            raise e
+            _LOGGER.warning("Could not update Tion state: %s", e, exc_info=True)
+            self.update_interval = self._delay
+            raise UpdateFailed(f"Could not update Tion state: {e}") from e
 
         response["is_on"]: bool = self._decode_state(response["state"])
         response["heater"]: bool = self._decode_state(response["heater"])
@@ -152,12 +167,19 @@ class TionInstance(DataUpdateCoordinator):
 
         args = ', '.join('%s=%r' % x for x in kwargs.items())
         _LOGGER.info("Need to set: " + args)
-        await self.__tion.set(kwargs)
-        self.data.update(original_args)
-        self.async_update_listeners()
+        async with self._operation_lock:
+            self._refresh_btle_device()
+            await self.__tion.set(kwargs)
+            self.update_interval = self.__keep_alive
+            self.data.update(original_args)
+            self.async_update_listeners()
 
     @staticmethod
-    def getTion(model: str, mac: str | BLEDevice) -> tion_btle.TionS3 | tion_btle.TionLite | tion_btle.TionS4:
+    def getTion(
+        model: str,
+        mac: str | BLEDevice,
+        connection_factory: Callable[[str | BLEDevice], Awaitable[BleakClient]] | None = None,
+    ) -> tion_btle.TionS3 | tion_btle.TionLite | tion_btle.TionS4:
         if model == 'S3':
             from tion_btle.s3 import TionS3 as Breezer
         elif model == 'S4':
@@ -166,13 +188,31 @@ class TionInstance(DataUpdateCoordinator):
             from tion_btle.lite import TionLite as Breezer
         else:
             raise NotImplementedError("Model '%s' is not supported!" % model)
-        return Breezer(mac)
+        return Breezer(mac, connection_factory=connection_factory)
 
-    async def connect(self):
-        return await self.__tion.connect()
+    async def _establish_connection(self, device: str | BLEDevice) -> BleakClient:
+        """Establish a reliable connection using Home Assistant's BLE path."""
+        if not isinstance(device, BLEDevice):
+            raise ValueError("Home Assistant must provide a BLEDevice")
+        return await establish_connection(
+            BleakClient,
+            device,
+            self.config.get("name", self.config[CONF_MAC]),
+            max_attempts=3,
+        )
 
-    async def disconnect(self):
-        return await self.__tion.disconnect()
+    def _refresh_btle_device(self) -> None:
+        """Select the best currently available adapter or Bluetooth proxy."""
+        device = bluetooth.async_ble_device_from_address(
+            self.hass,
+            self.config[CONF_MAC],
+            connectable=True,
+        )
+        if device is None:
+            raise UpdateFailed(
+                f"No connectable Bluetooth path to {self.config[CONF_MAC]}"
+            )
+        self.__tion.update_btle_device(device)
 
     @property
     def device_info(self):
