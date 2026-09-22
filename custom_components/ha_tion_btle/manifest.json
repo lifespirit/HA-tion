@@ -14,5 +14,5 @@
     "@IATkachenko"
   ],
   "config_flow": true,
-  "version": "v4.3.0-dev2"
+  "version": "v4.3.0-dev3"
 }
