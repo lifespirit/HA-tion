@@ -39,7 +39,7 @@ async def async_setup_entry(hass, config_entry: ConfigEntry):
     hass.data.setdefault(DOMAIN, {})
 
     instance = TionInstance(hass, config_entry)
-    hass.data[DOMAIN][config_entry.entry_id] = instance
+    hass.data[DOMAIN][config_entry.unique_id] = instance
     config_entry.async_on_unload(
         bluetooth.async_register_callback(
             hass=hass,
@@ -55,7 +55,7 @@ async def async_setup_entry(hass, config_entry: ConfigEntry):
             await close_stale_connections_by_address(instance.config[CONF_MAC])
         await instance.async_config_entry_first_refresh()
     except Exception:
-        hass.data[DOMAIN].pop(config_entry.entry_id, None)
+        hass.data[DOMAIN].pop(config_entry.unique_id, None)
         raise
 
     await hass.config_entries.async_forward_entry_setups(config_entry, PLATFORMS)
@@ -66,11 +66,11 @@ async def async_unload_entry(hass, config_entry: ConfigEntry) -> bool:
     """Stop polling and close any retained client before removing an entry."""
     if not await hass.config_entries.async_unload_platforms(config_entry, PLATFORMS):
         return False
-    instance = hass.data[DOMAIN][config_entry.entry_id]
+    instance = hass.data[DOMAIN][config_entry.unique_id]
     async with bluetooth_gate(hass).transaction():
         async with instance._operation_lock:
             await instance.close()
-    hass.data[DOMAIN].pop(config_entry.entry_id)
+    hass.data[DOMAIN].pop(config_entry.unique_id)
     return True
 
 
