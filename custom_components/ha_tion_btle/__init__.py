@@ -10,7 +10,11 @@ from functools import cached_property
 
 from bleak import BleakClient
 from bleak.backends.device import BLEDevice
-from bleak_retry_connector import BLEAK_RETRY_EXCEPTIONS, establish_connection
+from bleak_retry_connector import (
+    BLEAK_RETRY_EXCEPTIONS,
+    close_stale_connections_by_address,
+    establish_connection,
+)
 import tion_btle
 from homeassistant.components import bluetooth
 from homeassistant.components.bluetooth import BluetoothCallbackMatcher
@@ -20,6 +24,7 @@ from tion_btle.tion import MaxTriesExceededError, Tion
 from .const import DOMAIN, TION_SCHEMA, CONF_KEEP_ALIVE, CONF_AWAY_TEMP, CONF_MAC, PLATFORMS
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from .bluetooth_gate import bluetooth_gate
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,7 +39,7 @@ async def async_setup_entry(hass, config_entry: ConfigEntry):
     hass.data.setdefault(DOMAIN, {})
 
     instance = TionInstance(hass, config_entry)
-    hass.data[DOMAIN][config_entry.unique_id] = instance
+    hass.data[DOMAIN][config_entry.entry_id] = instance
     config_entry.async_on_unload(
         bluetooth.async_register_callback(
             hass=hass,
@@ -44,9 +49,28 @@ async def async_setup_entry(hass, config_entry: ConfigEntry):
         )
     )
 
-    await hass.data[DOMAIN][config_entry.unique_id].async_config_entry_first_refresh()
+    try:
+        # Reclaim a BlueZ connection left by a previous HA process/reload.
+        async with bluetooth_gate(hass).transaction():
+            await close_stale_connections_by_address(instance.config[CONF_MAC])
+        await instance.async_config_entry_first_refresh()
+    except Exception:
+        hass.data[DOMAIN].pop(config_entry.entry_id, None)
+        raise
 
     await hass.config_entries.async_forward_entry_setups(config_entry, PLATFORMS)
+    return True
+
+
+async def async_unload_entry(hass, config_entry: ConfigEntry) -> bool:
+    """Stop polling and close any retained client before removing an entry."""
+    if not await hass.config_entries.async_unload_platforms(config_entry, PLATFORMS):
+        return False
+    instance = hass.data[DOMAIN][config_entry.entry_id]
+    async with bluetooth_gate(hass).transaction():
+        async with instance._operation_lock:
+            await instance.close()
+    hass.data[DOMAIN].pop(config_entry.entry_id)
     return True
 
 
@@ -71,6 +95,7 @@ class TionInstance(DataUpdateCoordinator):
         # appear broken for ten minutes.
         self._delay: int = 30
         self._operation_lock = asyncio.Lock()
+        self._bluetooth_gate = bluetooth_gate(hass)
 
         self.__tion: Tion = self.getTion(
             self.model,
@@ -122,8 +147,9 @@ class TionInstance(DataUpdateCoordinator):
 
         try:
             async with self._operation_lock:
-                self._refresh_btle_device()
-                response = await self.__tion.get()
+                async with self._bluetooth_gate.transaction(self.__tion):
+                    self._refresh_btle_device()
+                    response = await self.__tion.get()
             self.update_interval = self.__keep_alive
 
         except MaxTriesExceededError as e:
@@ -168,11 +194,15 @@ class TionInstance(DataUpdateCoordinator):
         args = ', '.join('%s=%r' % x for x in kwargs.items())
         _LOGGER.info("Need to set: " + args)
         async with self._operation_lock:
-            self._refresh_btle_device()
-            await self.__tion.set(kwargs)
+            async with self._bluetooth_gate.transaction(self.__tion):
+                self._refresh_btle_device()
+                await self.__tion.set(kwargs)
             self.update_interval = self.__keep_alive
             self.data.update(original_args)
             self.async_update_listeners()
+
+    async def close(self) -> None:
+        await self.__tion.close()
 
     @staticmethod
     def getTion(

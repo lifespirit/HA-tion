@@ -19,6 +19,7 @@ from homeassistant.core import callback
 from tion_btle.tion import Tion
 
 from .const import DOMAIN, TION_SCHEMA, CONF_MAC
+from .bluetooth_gate import bluetooth_gate
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -162,7 +163,8 @@ class TionConfigFlow(TionFlow, config_entries.ConfigFlow, domain=DOMAIN):
                 _LOGGER.debug(input)
                 try:
                     _tion: Tion = self.getTion(input['model'], input['mac'])
-                    result = await _tion.get()
+                    async with bluetooth_gate(self.hass).transaction(_tion):
+                        result = await _tion.get()
                 except Exception as e:
                     _LOGGER.error("Could not get data from breezer. result is %s, error: %s" % (result, str(e)))
                     return self.async_show_form(step_id='add_failed')
@@ -178,12 +180,14 @@ class TionConfigFlow(TionFlow, config_entries.ConfigFlow, domain=DOMAIN):
         try:
             _LOGGER.debug(self._data)
             _tion: Tion = self.getTion(self._data['model'], self._data['mac'])
-            await _tion.pair()
+            async with bluetooth_gate(self.hass).transaction(_tion):
+                await _tion.pair()
             # We should sleep a bit, because immediately connection will cause device disconnected exception while
             # enabling notifications
             await  asyncio.sleep(3)
 
-            result = await _tion.get()
+            async with bluetooth_gate(self.hass).transaction(_tion):
+                result = await _tion.get()
         except Exception as e:
             _LOGGER.error("Cannot pair and get data. Data is %s, result is %s; %s: %s", self._data, result,
                           type(e).__name__, str(e))
