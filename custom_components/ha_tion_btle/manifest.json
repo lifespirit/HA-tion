@@ -8,11 +8,11 @@
     "fan"
   ],
   "requirements": [
-    "https://github.com/lifespirit/tion_python/archive/d020354f8a44c876ab945246a8214a6054ddc523.zip#tion-btle==3.3.7.dev0"
+    "https://github.com/lifespirit/tion_python/archive/6053b8709d3bc63e54c368fc04cf8634211ee466.zip#tion-btle==3.3.7.dev1"
   ],
   "codeowners": [
     "@IATkachenko"
   ],
   "config_flow": true,
-  "version": "v4.3.0-dev0"
+  "version": "v4.3.0-dev1"
 }
