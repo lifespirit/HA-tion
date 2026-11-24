@@ -8,7 +8,7 @@
     "fan"
   ],
   "requirements": [
-    "https://github.com/lifespirit/tion_python/archive/00b5527fc7194b66a58afcf939b244ed6d6dcff6.zip#tion-btle==3.3.7.dev0"
+    "tion-btle==3.3.7"
   ],
   "codeowners": [
     "@IATkachenko"
